@@ -17,6 +17,7 @@ export interface CreateEventInput {
   notes?: string;
   location?: string;
   reminder_minutes_before?: number[];
+  all_day?: boolean;
 }
 
 export interface ListEventsInput {
@@ -33,6 +34,7 @@ export interface UpdateEventInput {
   notes?: string;
   location?: string;
   reminder_minutes_before?: number[];
+  all_day?: boolean;
 }
 
 export interface DeleteEventInput {
@@ -48,6 +50,7 @@ export interface CalendarEvent {
   location: string;
   calendar: string;
   reminders_minutes_before: number[];
+  all_day: boolean;
 }
 
 // ---------- Time helpers ----------
@@ -86,6 +89,18 @@ interface VeventFields {
   description?: string;
   location?: string;
   reminderMinutesBefore?: number[];
+  allDay?: boolean;
+}
+
+/** Parse a local date or datetime as a Luxon DateTime in the user's tz. */
+function parseLocalDateOrDateTime(input: string): DateTime {
+  const tz = getUserTimezone();
+  return DateTime.fromISO(input, { zone: tz });
+}
+
+/** Returns true if the input looks like a date-only string (YYYY-MM-DD). */
+function isDateOnly(input: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(input.trim());
 }
 
 function triggerStringFor(minutesBefore: number): string {
@@ -117,14 +132,29 @@ function buildIcs(fields: VeventFields): string {
     'dtstamp',
     ICAL.Time.fromJSDate(new Date(), true),
   );
-  vevent.updatePropertyWithValue(
-    'dtstart',
-    ICAL.Time.fromJSDate(fields.startUtc, true),
-  );
-  vevent.updatePropertyWithValue(
-    'dtend',
-    ICAL.Time.fromJSDate(fields.endUtc, true),
-  );
+
+  if (fields.allDay) {
+    // All-day event: use VALUE=DATE form (no time component, no timezone).
+    // DTEND for all-day is EXCLUSIVE — must be the day after the last day.
+    const tz = getUserTimezone();
+    const startLocal = DateTime.fromJSDate(fields.startUtc).setZone(tz);
+    const endLocal = DateTime.fromJSDate(fields.endUtc).setZone(tz);
+    const startDate = ICAL.Time.fromDateString(startLocal.toFormat('yyyy-LL-dd'));
+    startDate.isDate = true;
+    const endDate = ICAL.Time.fromDateString(endLocal.toFormat('yyyy-LL-dd'));
+    endDate.isDate = true;
+    vevent.updatePropertyWithValue('dtstart', startDate);
+    vevent.updatePropertyWithValue('dtend', endDate);
+  } else {
+    vevent.updatePropertyWithValue(
+      'dtstart',
+      ICAL.Time.fromJSDate(fields.startUtc, true),
+    );
+    vevent.updatePropertyWithValue(
+      'dtend',
+      ICAL.Time.fromJSDate(fields.endUtc, true),
+    );
+  }
   if (fields.description !== undefined && fields.description.length > 0) {
     vevent.updatePropertyWithValue('description', fields.description);
   }
@@ -178,6 +208,7 @@ function parseIcs(ics: string): VeventFields | null {
       location:
         (vevent.getFirstPropertyValue('location') as string | null) ?? undefined,
       reminderMinutesBefore: reminders,
+      allDay: dtstart.isDate === true,
     };
   } catch (err) {
     console.warn('[caldav] Failed to parse ICS:', err);
@@ -194,10 +225,36 @@ export async function createCalendarEvent(input: CreateEventInput): Promise<stri
     typeof calendar.displayName === 'string' ? calendar.displayName : 'calendar';
 
   const uid = randomUUID();
-  const startUtc = parseLocalToUTC(input.start_datetime);
-  const endUtc = parseLocalToUTC(input.end_datetime);
 
-  if (endUtc.getTime() <= startUtc.getTime()) {
+  // Auto-detect all-day if either input looks like a date-only string.
+  const allDay =
+    input.all_day === true ||
+    isDateOnly(input.start_datetime) ||
+    isDateOnly(input.end_datetime);
+
+  // For all-day events, accept either YYYY-MM-DD or full ISO; parse as midnight in user's tz.
+  const tz = getUserTimezone();
+  const startDt = allDay
+    ? DateTime.fromISO(input.start_datetime.slice(0, 10), { zone: tz }).startOf('day')
+    : parseLocalDateOrDateTime(input.start_datetime);
+  let endDt = allDay
+    ? DateTime.fromISO(input.end_datetime.slice(0, 10), { zone: tz }).startOf('day')
+    : parseLocalDateOrDateTime(input.end_datetime);
+
+  // For all-day, if user gave the same date for start & end (a single-day event),
+  // ensure DTEND is the next day (iCal all-day DTEND is exclusive).
+  if (allDay && endDt <= startDt) {
+    endDt = startDt.plus({ days: 1 });
+  }
+
+  if (!startDt.isValid || !endDt.isValid) {
+    throw new Error(`Invalid datetime input: start=${input.start_datetime}, end=${input.end_datetime}`);
+  }
+
+  const startUtc = startDt.toUTC().toJSDate();
+  const endUtc = endDt.toUTC().toJSDate();
+
+  if (!allDay && endUtc.getTime() <= startUtc.getTime()) {
     throw new Error('end_datetime must be after start_datetime');
   }
 
@@ -209,6 +266,7 @@ export async function createCalendarEvent(input: CreateEventInput): Promise<stri
     description: input.notes,
     location: input.location,
     reminderMinutesBefore: input.reminder_minutes_before,
+    allDay,
   });
 
   const filename = `${uid}.ics`;
@@ -258,15 +316,21 @@ export async function listCalendarEvents(input: ListEventsInput): Promise<string
           const parsed = parseIcs(obj.data);
           if (!parsed) continue;
           if (parsed.endUtc < startUtc || parsed.startUtc > endUtc) continue;
+          const isAllDay = parsed.allDay === true;
           events.push({
             uid: encodeHandle(obj.url),
             title: parsed.summary,
-            start: utcToLocalIso(parsed.startUtc),
-            end: utcToLocalIso(parsed.endUtc),
+            start: isAllDay
+              ? DateTime.fromJSDate(parsed.startUtc).toUTC().toFormat('yyyy-LL-dd')
+              : utcToLocalIso(parsed.startUtc),
+            end: isAllDay
+              ? DateTime.fromJSDate(parsed.endUtc).toUTC().toFormat('yyyy-LL-dd')
+              : utcToLocalIso(parsed.endUtc),
             notes: parsed.description ?? '',
             location: parsed.location ?? '',
             calendar: calName,
             reminders_minutes_before: parsed.reminderMinutesBefore ?? [],
+            all_day: isAllDay,
           });
         }
         return events;
@@ -331,8 +395,10 @@ export async function updateCalendarEvent(input: UpdateEventInput): Promise<stri
     input.reminder_minutes_before !== undefined
       ? input.reminder_minutes_before
       : parsed.reminderMinutesBefore;
+  const newAllDay =
+    input.all_day !== undefined ? input.all_day : parsed.allDay === true;
 
-  if (newEndUtc.getTime() <= newStartUtc.getTime()) {
+  if (!newAllDay && newEndUtc.getTime() <= newStartUtc.getTime()) {
     throw new Error('end_datetime must be after start_datetime');
   }
 
@@ -344,6 +410,7 @@ export async function updateCalendarEvent(input: UpdateEventInput): Promise<stri
     description: newDescription,
     location: newLocation,
     reminderMinutesBefore: newReminders,
+    allDay: newAllDay,
   });
 
   await client.updateCalendarObject({

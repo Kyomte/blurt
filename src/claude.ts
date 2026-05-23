@@ -107,6 +107,11 @@ Choosing a reminder list (create_reminder):
 Locations (events):
 - Pass concrete strings like "Starbucks Shibuya", "Conference Room 3", "Zoom: <link>". Apple Calendar geocodes addresses.
 
+All-day events:
+- When the user says "all day", "all-day event", "for the whole day", "block out tomorrow", or names just a date with no time ("birthday on June 15"), set all_day=true.
+- For all-day events, pass dates as "YYYY-MM-DD" (no time portion). For a single-day all-day event, start_datetime and end_datetime should be the SAME date.
+- For a multi-day all-day span (e.g. "trip from May 25 to May 28"), set start_datetime="2026-05-25" and end_datetime="2026-05-28" — the bot handles iCal's exclusive-end convention.
+
 Other guidelines:
 - When the user mentions schedule, meetings, events, or appointments, use the calendar tools.
 - All datetimes you pass to tools must be ISO 8601 in the user's LOCAL time (no timezone suffix), e.g. 2026-06-15T14:30:00.

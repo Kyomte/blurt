@@ -34,6 +34,11 @@ export const calendarTools: Anthropic.Tool[] = [
           description:
             "Optional list of reminders, in minutes before the event. Examples: [60] = 1 hour before, [10] = 10 min before, [0, 1440] = at start time and 1 day before, [15, 1440] = 15 min and 1 day before. Default behavior is no reminders unless the user mentions one.",
         },
+        all_day: {
+          type: 'boolean',
+          description:
+            "Set true to create an all-day event (toggles the 'All-Day' switch in Apple Calendar). For all-day events you can pass dates as 'YYYY-MM-DD' (e.g. '2026-05-25') and for a single-day all-day event the start_datetime and end_datetime should be the SAME date. For a multi-day all-day span, pass the last day as end_datetime — the bot handles the iCal exclusive-end convention internally.",
+        },
       },
       required: ['title', 'start_datetime', 'end_datetime'],
     },
@@ -76,6 +81,10 @@ export const calendarTools: Anthropic.Tool[] = [
           items: { type: 'integer', minimum: 0 },
           description:
             'Replaces all existing reminders. Pass [] to remove all. Omit to keep existing reminders unchanged.',
+        },
+        all_day: {
+          type: 'boolean',
+          description: 'Convert to/from an all-day event.',
         },
       },
       required: ['event_uid'],
