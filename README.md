@@ -1,4 +1,4 @@
-# Claudendar
+# Blurt
 
 A Telegram bot that lets you manage your Apple Calendar and Apple Reminders by chatting in plain English. Runs in the cloud so it works even when your Mac is off — events sync to all your Apple devices via iCloud CalDAV.
 
@@ -19,7 +19,7 @@ A Telegram bot that lets you manage your Apple Calendar and Apple Reminders by c
 ## Architecture
 
 ```
-Telegram ⇄ Bot (Telegraf, long-polling) ⇄ Claude (tool use) ⇄ iCloud CalDAV
+Telegram ⇄ Bot (Telegraf, long-polling) ⇄ LLM (tool use) ⇄ iCloud CalDAV
                                                                     │
                                                                     ▼
                                                           Apple Calendar / Reminders
@@ -34,7 +34,7 @@ Telegram ⇄ Bot (Telegraf, long-polling) ⇄ Claude (tool use) ⇄ iCloud CalDA
 | What | Where |
 |---|---|
 | **Telegram bot token** | [@BotFather](https://t.me/BotFather) → `/newbot` |
-| **Anthropic API key** | [console.anthropic.com](https://console.anthropic.com) — add a few dollars of credit |
+| **LLM API key** | [Anthropic](https://console.anthropic.com) (default) or [OpenAI](https://platform.openai.com) — see [Configuration](#configuration) |
 | **iCloud app-specific password** | [appleid.apple.com](https://appleid.apple.com) → *Sign-In and Security* → *App-Specific Passwords* |
 | **Your IANA timezone** | e.g. `America/Los_Angeles`, `Europe/London`, `Asia/Tokyo` |
 
@@ -44,7 +44,7 @@ Telegram ⇄ Bot (Telegraf, long-polling) ⇄ Claude (tool use) ⇄ iCloud CalDA
 
 ```bash
 git clone <this-repo>
-cd claudendar
+cd blurt
 npm install
 cp .env.example .env
 # Edit .env and fill in your tokens
@@ -89,15 +89,15 @@ Fly will auto-redeploy.
 ## Deploy with Docker (any host)
 
 ```bash
-docker build -t claudendar .
-docker run -d --restart unless-stopped --name claudendar \
+docker build -t blurt .
+docker run -d --restart unless-stopped --name blurt \
   -e TELEGRAM_BOT_TOKEN='...' \
   -e ANTHROPIC_API_KEY='...' \
   -e ICLOUD_USERNAME='you@icloud.com' \
   -e ICLOUD_APP_PASSWORD='xxxx-xxxx-xxxx-xxxx' \
   -e USER_TIMEZONE='America/Los_Angeles' \
   -e ALLOWED_CHAT_IDS='123456789' \
-  claudendar
+  blurt
 ```
 
 Works on Hetzner, DigitalOcean, Oracle Cloud Always Free, a Raspberry Pi at home — anywhere Docker runs.
@@ -109,7 +109,10 @@ All configuration is via environment variables (loaded from `.env` locally or se
 | Variable | Required | Description |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | yes | From @BotFather |
-| `ANTHROPIC_API_KEY` | yes | From console.anthropic.com |
+| `LLM_PROVIDER` | optional | Which backend to use: `anthropic` (default) or `openai`. |
+| `ANTHROPIC_API_KEY` | if anthropic | From console.anthropic.com |
+| `OPENAI_API_KEY` | if openai | From platform.openai.com |
+| `OPENAI_BASE_URL` | optional | Point at any OpenAI-compatible endpoint (Groq, Together, OpenRouter, Ollama). |
 | `ICLOUD_USERNAME` | yes | Your Apple ID email |
 | `ICLOUD_APP_PASSWORD` | yes | App-specific password (NOT your normal Apple ID password) |
 | `USER_TIMEZONE` | yes | IANA name, e.g. `America/Los_Angeles` |
@@ -117,13 +120,13 @@ All configuration is via environment variables (loaded from `.env` locally or se
 | `ICLOUD_CALENDAR_NAME` | optional | Default calendar for new events. Defaults to first writable. |
 | `ICLOUD_REMINDER_LIST_NAME` | optional | Default reminder list. Defaults to first. |
 | `MAX_HISTORY_MESSAGES` | optional | Conversation history cap per chat. Default `20`. |
-| `CLAUDE_MODEL` | optional | Anthropic model. Defaults to `claude-sonnet-4-6`. Set to `claude-haiku-4-5` for cheaper/faster responses (recommended for personal use). |
+| `LLM_MODEL` | optional | Model id for the active provider. Defaults: `claude-sonnet-4-6` (anthropic) / `gpt-4o` (openai). Cheaper/faster: `claude-haiku-4-5` or `gpt-4o-mini` (recommended for personal use). |
 
 ## Telegram Commands
 
 - `/start` — welcome message
 - `/clear` — reset conversation history for the current chat
-- Anything else — Claude routes it through calendar / reminder tools
+- Anything else — Blurt routes it through calendar / reminder tools
 
 ## Example Conversations
 
@@ -156,9 +159,10 @@ Bot: Set a calendar event "Text the landlord" at 8:00 PM with an alarm at start.
 src/
 ├── index.ts                 # Entry: env validation + bot launch
 ├── bot.ts                   # Telegraf setup, auth, history, commands
-├── claude.ts                # Anthropic SDK agentic tool-use loop with backoff
+├── agent.ts                 # Provider-agnostic agentic tool-use loop with backoff
+├── providers/               # LLM seam: neutral types + Anthropic & OpenAI adapters
 └── tools/
-    ├── definitions.ts       # Tool JSON schemas for Claude
+    ├── definitions.ts       # Tool JSON schemas (provider-neutral)
     ├── dispatcher.ts        # Routes tool name → implementation
     ├── caldav.ts            # CalDAV client + calendar/list discovery (cached)
     ├── calendar.ts          # VEVENT operations (events)
@@ -168,11 +172,11 @@ src/
 ## How It Works
 
 1. You send a Telegram message.
-2. The bot forwards it to Claude with the calendar/reminder tools registered.
-3. Claude inspects the message, chooses tool(s), and calls them.
+2. The bot forwards it to the configured LLM with the calendar/reminder tools registered.
+3. The model inspects the message, chooses tool(s), and calls them.
 4. Tools talk to iCloud CalDAV (`caldav.icloud.com`), which is the same backend Apple Calendar and Reminders use.
 5. iCloud propagates the change to every signed-in device via push within seconds.
-6. Claude composes a friendly confirmation and sends it back to you on Telegram.
+6. The model composes a friendly confirmation and sends it back to you on Telegram.
 
 ## Apple Reminders Limitations
 
@@ -183,7 +187,7 @@ iCloud has two parallel reminder systems:
 
 If your account was migrated to the new format (most accounts post-iOS 13), reminders the bot creates may not appear in the Reminders app. They will appear in the CalDAV `Reminders` list — sometimes visible via iCloud.com → Reminders.
 
-**Workaround:** By default, Claude treats `"remind me to X at <time>"` requests as **calendar events with alarms** instead of true reminders. This sidesteps the limitation and gets you the same notification-on-your-device behavior. To force a true reminder, say *"add a task to Reminders"* explicitly.
+**Workaround:** By default, Blurt treats `"remind me to X at <time>"` requests as **calendar events with alarms** instead of true reminders. This sidesteps the limitation and gets you the same notification-on-your-device behavior. To force a true reminder, say *"add a task to Reminders"* explicitly.
 
 ## Security Notes
 

@@ -1,20 +1,20 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { calendarTools } from './tools/definitions';
 import { dispatchTool } from './tools/dispatcher';
 import { getCalendarNames, getReminderListNames } from './tools/caldav';
+import { getProvider } from './providers';
+import type { Message, TextBlock, ToolResultBlock, ToolUseBlock } from './providers';
 
-export type MessageParam = Anthropic.MessageParam;
-
-const client = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-  maxRetries: 5,
-});
+export type { Message } from './providers';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function callWithBackoff<T>(fn: () => Promise<T>, label: string): Promise<T> {
+async function callWithBackoff<T>(
+  fn: () => Promise<T>,
+  label: string,
+  isRetryable: (err: unknown) => boolean,
+): Promise<T> {
   const maxAttempts = 6;
   let lastErr: unknown;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -22,11 +22,10 @@ async function callWithBackoff<T>(fn: () => Promise<T>, label: string): Promise<
       return await fn();
     } catch (err: unknown) {
       lastErr = err;
-      const status = (err as { status?: number }).status;
-      const retryable = status === 529 || status === 503 || status === 502 || status === 500;
-      if (!retryable || attempt === maxAttempts - 1) {
+      if (!isRetryable(err) || attempt === maxAttempts - 1) {
         throw err;
       }
+      const status = (err as { status?: number }).status;
       const waitMs = Math.min(1000 * 2 ** attempt, 15000) + Math.random() * 500;
       console.warn(
         `[${label}] HTTP ${status} (attempt ${attempt + 1}/${maxAttempts}) — retrying in ${Math.round(waitMs)}ms`,
@@ -37,7 +36,6 @@ async function callWithBackoff<T>(fn: () => Promise<T>, label: string): Promise<
   throw lastErr;
 }
 
-const MODEL = process.env.CLAUDE_MODEL?.trim() || 'claude-sonnet-4-6';
 const MAX_TOKENS = 4096;
 const MAX_TOOL_ROUNDS = 8;
 
@@ -66,7 +64,7 @@ async function buildSystemPrompt(): Promise<string> {
       calendarsBlock = `\nAvailable event calendars (use the exact name in calendar_name):\n${names.map((n) => `- ${n}`).join('\n')}\n`;
     }
   } catch (err) {
-    console.warn('[claude] Could not load calendar list:', err);
+    console.warn('[blurt] Could not load calendar list:', err);
   }
   try {
     const names = await getReminderListNames();
@@ -74,10 +72,10 @@ async function buildSystemPrompt(): Promise<string> {
       remindersBlock = `\nAvailable reminder lists (use the exact name in list_name):\n${names.map((n) => `- ${n}`).join('\n')}\n`;
     }
   } catch (err) {
-    console.warn('[claude] Could not load reminder lists:', err);
+    console.warn('[blurt] Could not load reminder lists:', err);
   }
 
-  return `You are Claudendar, a helpful assistant managing the user's iCloud / Apple Calendar AND Apple Reminders via CalDAV tools.
+  return `You are Blurt, a helpful assistant managing the user's iCloud / Apple Calendar AND Apple Reminders via CalDAV tools.
 
 Right now it is ${todayString()}. The user's timezone is ${tz}.
 ${calendarsBlock}${remindersBlock}
@@ -93,7 +91,10 @@ Apple Reminders (VTODO) doesn't sync reliably to this user's Reminders app due t
 - Apple REMINDERS / tasks (create_reminder etc): a to-do, optionally with a due time. Stored separately. May not show in the modern Reminders app for this account.
 
 Choosing an event calendar (create_calendar_event):
-- Infer from context. Workout/run → "Workouts"; class/lecture/exam → "School"; team standup/work meeting → "Work"; family/shared event → "Personal"; otherwise pick the most fitting one.
+- HARD RULES (always follow these first):
+  • Climbing, bouldering, gym session, or any climbing/bouldering-related activity → "Workouts"
+  • Lunch, dinner, breakfast, shower, or other daily routine/meal activities → "NA"
+- General inference (if no hard rule matches): Workout/run/exercise → "Workouts"; class/lecture/exam → "School"; team standup/work meeting → "Work"; family/shared event → "Personal"; otherwise pick the most fitting one.
 - If unsure, omit calendar_name.
 
 Event alerts (reminder_minutes_before on an event, NOT a reminder list):
@@ -126,16 +127,19 @@ Other guidelines:
 
 export interface ProcessResult {
   responseText: string;
-  updatedHistory: MessageParam[];
+  updatedHistory: Message[];
 }
 
 export async function processMessage(
   userText: string,
-  history: MessageParam[],
+  history: Message[],
 ): Promise<ProcessResult> {
-  const messages: MessageParam[] = [
+  const provider = getProvider();
+  const model = process.env.LLM_MODEL?.trim() || provider.defaultModel;
+
+  const messages: Message[] = [
     ...history,
-    { role: 'user', content: userText },
+    { role: 'user', content: [{ type: 'text', text: userText }] },
   ];
 
   const systemPrompt = await buildSystemPrompt();
@@ -143,40 +147,39 @@ export async function processMessage(
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const response = await callWithBackoff(
       () =>
-        client.messages.create({
-          model: MODEL,
-          max_tokens: MAX_TOKENS,
+        provider.createMessage({
           system: systemPrompt,
           tools: calendarTools,
           messages,
+          model,
+          maxTokens: MAX_TOKENS,
         }),
-      'anthropic',
+      provider.name,
+      (err) => provider.isRetryable(err),
     );
 
     messages.push({ role: 'assistant', content: response.content });
 
-    if (response.stop_reason === 'end_turn' || response.stop_reason === 'stop_sequence') {
+    // 'end_turn' or 'other' (max_tokens/length/content_filter) are both terminal —
+    // return whatever text we have rather than throwing on an unexpected stop.
+    if (response.stopReason !== 'tool_use') {
       const textBlocks = response.content.filter(
-        (b): b is Anthropic.TextBlock => b.type === 'text',
+        (b): b is TextBlock => b.type === 'text',
       );
       const responseText = textBlocks.map((b) => b.text).join('\n\n').trim() || '(no response)';
       return { responseText, updatedHistory: messages };
     }
 
-    if (response.stop_reason !== 'tool_use') {
-      throw new Error(`Unexpected stop_reason: ${response.stop_reason}`);
-    }
-
     const toolUseBlocks = response.content.filter(
-      (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use',
+      (b): b is ToolUseBlock => b.type === 'tool_use',
     );
 
-    const toolResults: Anthropic.ToolResultBlockParam[] = await Promise.all(
+    const toolResults: ToolResultBlock[] = await Promise.all(
       toolUseBlocks.map(async (block) => {
         let result: string;
         let isError = false;
         try {
-          result = await dispatchTool(block.name, block.input as Record<string, unknown>);
+          result = await dispatchTool(block.name, block.input);
         } catch (err: unknown) {
           const e = err as { message?: string };
           result = `Error: ${e.message ?? String(err)}`;
@@ -187,9 +190,9 @@ export async function processMessage(
         );
         return {
           type: 'tool_result' as const,
-          tool_use_id: block.id,
+          toolUseId: block.id,
           content: result,
-          is_error: isError,
+          isError,
         };
       }),
     );

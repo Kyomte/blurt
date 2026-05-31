@@ -1,4 +1,4 @@
-# fly.toml — Fly.io config for Claudendar
+# fly.toml — Fly.io config for Blurt
 # IMPORTANT: `app` must be globally unique across all of Fly.
 # Pick your own name before running `fly launch` or `fly apps create`.
 
@@ -21,3 +21,4 @@ primary_region = "iad"   # change to your nearest Fly region (sjc, lhr, nrt, etc
 #   fly secrets set TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=... \
 #                   ICLOUD_USERNAME=... ICLOUD_APP_PASSWORD=... \
 #                   USER_TIMEZONE=America/Los_Angeles ALLOWED_CHAT_IDS=...
+# To run on OpenAI instead of Claude: fly secrets set LLM_PROVIDER=openai OPENAI_API_KEY=...

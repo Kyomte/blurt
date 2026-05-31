@@ -122,7 +122,7 @@ function buildValarm(minutesBefore: number, summary: string): ICAL.Component {
 
 function buildIcs(fields: VeventFields): string {
   const vcalendar = new ICAL.Component(['vcalendar', [], []]);
-  vcalendar.updatePropertyWithValue('prodid', '-//Claudendar//EN');
+  vcalendar.updatePropertyWithValue('prodid', '-//Blurt//EN');
   vcalendar.updatePropertyWithValue('version', '2.0');
 
   const vevent = new ICAL.Component('vevent');

@@ -14,7 +14,17 @@ function requireEnv(name: string): string {
 }
 
 const token = requireEnv('TELEGRAM_BOT_TOKEN');
-requireEnv('ANTHROPIC_API_KEY');
+
+const provider = (process.env.LLM_PROVIDER?.trim() || 'anthropic').toLowerCase();
+if (provider === 'anthropic') {
+  requireEnv('ANTHROPIC_API_KEY');
+} else if (provider === 'openai') {
+  requireEnv('OPENAI_API_KEY');
+} else {
+  console.error(`Unknown LLM_PROVIDER "${provider}". Supported values: anthropic, openai.`);
+  process.exit(1);
+}
+
 requireEnv('ICLOUD_USERNAME');
 requireEnv('ICLOUD_APP_PASSWORD');
 requireEnv('USER_TIMEZONE');
@@ -33,7 +43,7 @@ process.once('SIGTERM', () => {
 bot
   .launch()
   .then(() => {
-    console.log('Claudendar is running (Telegram long-polling). Press Ctrl+C to stop.');
+    console.log('Blurt is running (Telegram long-polling). Press Ctrl+C to stop.');
   })
   .catch((err) => {
     console.error('Failed to start bot:', err);

@@ -84,7 +84,7 @@ interface VtodoFields {
 
 function buildVtodoIcs(fields: VtodoFields): string {
   const vcal = new ICAL.Component(['vcalendar', [], []]);
-  vcal.updatePropertyWithValue('prodid', '-//Claudendar//EN');
+  vcal.updatePropertyWithValue('prodid', '-//Blurt//EN');
   vcal.updatePropertyWithValue('version', '2.0');
 
   const vtodo = new ICAL.Component('vtodo');

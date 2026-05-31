@@ -1,6 +1,7 @@
 import { Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
-import { processMessage, MessageParam } from './claude';
+import { processMessage } from './agent';
+import type { Message } from './providers';
 
 const MAX_HISTORY = parseInt(process.env.MAX_HISTORY_MESSAGES ?? '20', 10);
 
@@ -15,31 +16,25 @@ const ALLOWED_CHAT_IDS: Set<number> | null = (() => {
   );
 })();
 
-const conversationHistory = new Map<number, MessageParam[]>();
+const conversationHistory = new Map<number, Message[]>();
 
-function getHistory(chatId: number): MessageParam[] {
+function getHistory(chatId: number): Message[] {
   const existing = conversationHistory.get(chatId);
   if (existing) return existing;
-  const fresh: MessageParam[] = [];
+  const fresh: Message[] = [];
   conversationHistory.set(chatId, fresh);
   return fresh;
 }
 
-function isRealUserMessage(m: MessageParam): boolean {
+function isRealUserMessage(m: Message): boolean {
   if (m.role !== 'user') return false;
-  if (typeof m.content === 'string') return true;
-  if (Array.isArray(m.content)) {
-    // A "real" user input contains no tool_result blocks.
-    // tool_result-bearing messages are replies to assistant tool_use and
-    // can't appear without a preceding tool_use turn.
-    return !m.content.some(
-      (b) => typeof b === 'object' && b !== null && 'type' in b && b.type === 'tool_result',
-    );
-  }
-  return true;
+  // A "real" user input contains no tool_result blocks. tool_result-bearing
+  // messages are replies to assistant tool_use and can't appear without a
+  // preceding tool_use turn.
+  return !m.content.some((b) => b.type === 'tool_result');
 }
 
-function pruneHistory(messages: MessageParam[]): MessageParam[] {
+function pruneHistory(messages: Message[]): Message[] {
   if (messages.length <= MAX_HISTORY) return messages;
   const trimmed = messages.slice(messages.length - MAX_HISTORY);
   // Find first message that's a real user input — guarantees the Anthropic
@@ -75,7 +70,7 @@ export function createBot(token: string): Telegraf {
 
   bot.command('start', async (ctx) => {
     await ctx.reply(
-      'Hi! I\'m Claudendar — I manage your Apple Calendar.\n\n' +
+      'Hi! I\'m Blurt — I manage your Apple Calendar.\n\n' +
         'Try things like:\n' +
         '• "What\'s on my calendar today?"\n' +
         '• "Schedule a coffee chat tomorrow at 3pm for 30 min"\n' +
@@ -105,19 +100,18 @@ export function createBot(token: string): Telegraf {
       const history = getHistory(chatId);
       const { responseText, updatedHistory } = await processMessage(userText, history);
       conversationHistory.set(chatId, pruneHistory(updatedHistory));
-      console.log(`[${chatId}] claude: ${responseText.slice(0, 200)}`);
+      console.log(`[${chatId}] blurt: ${responseText.slice(0, 200)}`);
       await ctx.reply(responseText);
     } catch (err: unknown) {
       const e = err as { status?: number; message?: string };
       console.error(`[${chatId}] error:`, err);
       let userMessage: string;
-      if (e.status === 529) {
-        userMessage =
-          "Claude's API is overloaded right now (Anthropic-side capacity). Try again in a minute.";
+      if (e.status === 529 || e.status === 503) {
+        userMessage = 'The model API is overloaded right now. Try again in a minute.';
       } else if (e.status === 429) {
-        userMessage = "Rate limited by Claude. Give it a moment and try again.";
+        userMessage = 'Rate limited by the model API. Give it a moment and try again.';
       } else if (e.status === 401 || e.status === 403) {
-        userMessage = "Auth failed talking to Claude — check your ANTHROPIC_API_KEY.";
+        userMessage = 'Auth failed talking to the model API — check your provider API key.';
       } else if (typeof e.message === 'string' && e.message.includes('AppleScript')) {
         userMessage = `Calendar error: ${e.message}`;
       } else {

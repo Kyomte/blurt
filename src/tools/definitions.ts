@@ -1,11 +1,11 @@
-import type Anthropic from '@anthropic-ai/sdk';
+import type { ToolDefinition } from '../providers';
 
-export const calendarTools: Anthropic.Tool[] = [
+export const calendarTools: ToolDefinition[] = [
   {
     name: 'create_calendar_event',
     description:
       "Create a new event in one of the user's iCloud calendars. Choose calendar_name based on the event's context (see the list in the system prompt). Returns an opaque uid for later update/delete. All datetimes are ISO 8601 in the user's LOCAL time (no timezone suffix), e.g. 2026-06-15T14:30:00.",
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         title: { type: 'string', description: 'Event title' },
@@ -47,7 +47,7 @@ export const calendarTools: Anthropic.Tool[] = [
     name: 'list_calendar_events',
     description:
       "List events within a date range. By default searches ALL of the user's calendars. Pass calendar_name to restrict to one. Use a full-day range (T00:00:00 to T23:59:59) when the user asks about specific days. Each returned event includes its source calendar name and an opaque uid for update/delete.",
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         start_date: { type: 'string', description: 'ISO 8601 local start of range' },
@@ -64,7 +64,7 @@ export const calendarTools: Anthropic.Tool[] = [
     name: 'update_calendar_event',
     description:
       'Update an existing event by uid. Only the provided fields are changed. When changing time, always provide BOTH start_datetime and end_datetime together.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         event_uid: {
@@ -93,7 +93,7 @@ export const calendarTools: Anthropic.Tool[] = [
   {
     name: 'delete_calendar_event',
     description: 'Delete an event by its opaque uid.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         event_uid: { type: 'string', description: 'Opaque uid of the event to delete' },
@@ -108,7 +108,7 @@ export const calendarTools: Anthropic.Tool[] = [
     name: 'create_reminder',
     description:
       "Create a task in Apple Reminders. Use this when the user says 'remind me to ...' (an action/todo), as opposed to scheduling a time-blocked event. due_datetime is optional — many reminders are just tasks without a due date.",
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         title: { type: 'string', description: 'What the reminder is about' },
@@ -137,7 +137,7 @@ export const calendarTools: Anthropic.Tool[] = [
     name: 'list_reminders',
     description:
       "List reminders (Apple Reminders tasks). By default, returns only pending reminders across all lists. Use include_completed to include completed ones. Use due_before / due_after to filter by due date range (both filters skip reminders with no due date).",
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         list_name: {
@@ -163,7 +163,7 @@ export const calendarTools: Anthropic.Tool[] = [
     name: 'update_reminder',
     description:
       "Update a reminder by uid. Use completed=true to mark it done. Pass due_datetime as null (JSON null) to clear the due date.",
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         reminder_uid: { type: 'string' },
@@ -185,7 +185,7 @@ export const calendarTools: Anthropic.Tool[] = [
   {
     name: 'delete_reminder',
     description: 'Delete a reminder by uid.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         reminder_uid: { type: 'string' },
