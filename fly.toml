@@ -2,7 +2,7 @@
 # IMPORTANT: `app` must be globally unique across all of Fly.
 # Pick your own name before running `fly launch` or `fly apps create`.
 
-app = "claudendar"
+app = "claudendar-kio"
 primary_region = "iad"   # change to your nearest Fly region (sjc, lhr, nrt, etc.)
 
 [build]
