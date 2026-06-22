@@ -132,3 +132,27 @@ export async function findCalendarForObjectUrl(
 export function getUserTimezone(): string {
   return process.env.USER_TIMEZONE?.trim() || 'UTC';
 }
+
+// ---------- Account capability detection ----------
+
+export interface AccountCapabilities {
+  /** The account exposes at least one VEVENT (event) calendar. */
+  hasEventCalendars: boolean;
+  /** The account exposes at least one VTODO (reminder list) collection. */
+  hasReminderLists: boolean;
+}
+
+/**
+ * Probe what the connected iCloud account actually supports, so the agent can
+ * tailor the events-vs-reminders default instead of hardcoding it. Accounts
+ * migrated to modern CloudKit Reminders often expose NO CalDAV VTODO collections
+ * at all — on those, writing a "reminder" is pointless and we should always use
+ * calendar events. Reads from the same cached collection list, so this is cheap.
+ */
+export async function getAccountCapabilities(): Promise<AccountCapabilities> {
+  const all = await fetchAllOnce();
+  return {
+    hasEventCalendars: all.some((c) => hasComponent(c, 'VEVENT')),
+    hasReminderLists: all.some((c) => hasComponent(c, 'VTODO')),
+  };
+}
