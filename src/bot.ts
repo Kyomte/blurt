@@ -1,6 +1,7 @@
 import { Telegraf } from 'telegraf';
 import { message } from 'telegraf/filters';
 import { processMessage } from './agent';
+import { toTelegramMarkdown } from './telegram-format';
 import type { Message } from './providers';
 
 const MAX_HISTORY = parseInt(process.env.MAX_HISTORY_MESSAGES ?? '20', 10);
@@ -26,7 +27,7 @@ function getHistory(chatId: number): Message[] {
   return fresh;
 }
 
-function isRealUserMessage(m: Message): boolean {
+export function isRealUserMessage(m: Message): boolean {
   if (m.role !== 'user') return false;
   // A "real" user input contains no tool_result blocks. tool_result-bearing
   // messages are replies to assistant tool_use and can't appear without a
@@ -34,9 +35,9 @@ function isRealUserMessage(m: Message): boolean {
   return !m.content.some((b) => b.type === 'tool_result');
 }
 
-function pruneHistory(messages: Message[]): Message[] {
-  if (messages.length <= MAX_HISTORY) return messages;
-  const trimmed = messages.slice(messages.length - MAX_HISTORY);
+export function pruneHistory(messages: Message[], maxHistory: number = MAX_HISTORY): Message[] {
+  if (messages.length <= maxHistory) return messages;
+  const trimmed = messages.slice(messages.length - maxHistory);
   // Find first message that's a real user input — guarantees the Anthropic
   // API invariant that the conversation starts with a user turn AND that any
   // tool_result block has its matching tool_use in the previous assistant turn.
@@ -46,6 +47,28 @@ function pruneHistory(messages: Message[]): Message[] {
     return messages;
   }
   return trimmed.slice(firstRealUserIdx);
+}
+
+/**
+ * Send a reply as Telegram MarkdownV2, falling back to plain text if Telegram
+ * rejects the formatted version (a malformed-entity 400). The fallback means a
+ * formatting edge case can never swallow the actual answer.
+ */
+async function sendFormatted(
+  ctx: { reply: (text: string, extra?: Record<string, unknown>) => Promise<unknown> },
+  text: string,
+): Promise<void> {
+  try {
+    await ctx.reply(toTelegramMarkdown(text), { parse_mode: 'MarkdownV2' });
+  } catch (err: unknown) {
+    const e = err as { description?: string; response?: { description?: string } };
+    const desc = e.description ?? e.response?.description ?? '';
+    if (/can't parse entities|parse entities|MARKDOWN/i.test(desc)) {
+      await ctx.reply(text);
+    } else {
+      throw err;
+    }
+  }
 }
 
 export function createBot(token: string): Telegraf {
@@ -101,7 +124,7 @@ export function createBot(token: string): Telegraf {
       const { responseText, updatedHistory } = await processMessage(userText, history);
       conversationHistory.set(chatId, pruneHistory(updatedHistory));
       console.log(`[${chatId}] blurt: ${responseText.slice(0, 200)}`);
-      await ctx.reply(responseText);
+      await sendFormatted(ctx, responseText);
     } catch (err: unknown) {
       const e = err as { status?: number; message?: string };
       console.error(`[${chatId}] error:`, err);
