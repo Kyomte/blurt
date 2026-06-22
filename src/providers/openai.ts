@@ -38,7 +38,7 @@ function textOf(content: ContentBlock[]): string {
     .join('\n\n');
 }
 
-function toOpenAiMessages(system: string, messages: Message[]): ChatMessage[] {
+export function toOpenAiMessages(system: string, messages: Message[]): ChatMessage[] {
   const out: ChatMessage[] = [{ role: 'system', content: system }];
 
   for (const m of messages) {
@@ -77,7 +77,7 @@ function toOpenAiMessages(system: string, messages: Message[]): ChatMessage[] {
   return out;
 }
 
-function toNeutralStopReason(reason: string | null): StopReason {
+export function toNeutralStopReason(reason: string | null): StopReason {
   switch (reason) {
     case 'tool_calls':
     case 'function_call':

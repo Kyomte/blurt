@@ -8,7 +8,10 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "build": "tsc",
-    "start:compiled": "node dist/index.js"
+    "start:compiled": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/unit/*.test.ts",
+    "test:integration": "tsx --test test/integration/*.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

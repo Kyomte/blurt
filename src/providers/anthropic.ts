@@ -13,7 +13,7 @@ type AnthropicContentParam =
   | Anthropic.ToolUseBlockParam
   | Anthropic.ToolResultBlockParam;
 
-function toAnthropicMessages(messages: Message[]): Anthropic.MessageParam[] {
+export function toAnthropicMessages(messages: Message[]): Anthropic.MessageParam[] {
   return messages.map((m) => {
     const content: AnthropicContentParam[] = m.content.map((b) => {
       switch (b.type) {
@@ -34,7 +34,7 @@ function toAnthropicMessages(messages: Message[]): Anthropic.MessageParam[] {
   });
 }
 
-function toNeutralStopReason(reason: Anthropic.Message['stop_reason']): StopReason {
+export function toNeutralStopReason(reason: Anthropic.Message['stop_reason']): StopReason {
   switch (reason) {
     case 'tool_use':
       return 'tool_use';
