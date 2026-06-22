@@ -8,6 +8,8 @@ import {
   findCalendarForObjectUrl,
   getUserTimezone,
 } from './caldav';
+import { encodeHandle, decodeHandle } from './handle';
+import { buildRrule, parseRrule, describeRecurrence, type Recurrence } from './rrule';
 
 export interface CreateReminderInput {
   title: string;
@@ -15,6 +17,7 @@ export interface CreateReminderInput {
   list_name?: string;
   notes?: string;
   priority?: number; // 1 = high, 5 = medium, 9 = low (per RFC 5545)
+  recurrence?: Recurrence;
 }
 
 export interface ListRemindersInput {
@@ -31,6 +34,8 @@ export interface UpdateReminderInput {
   notes?: string;
   priority?: number;
   completed?: boolean;
+  /** Pass a recurrence to set/replace; pass null to remove it. Omit to keep. */
+  recurrence?: Recurrence | null;
 }
 
 export interface DeleteReminderInput {
@@ -45,6 +50,7 @@ export interface ReminderItem {
   list: string;
   completed: boolean;
   priority: number | null;
+  recurrence: Recurrence | null;
 }
 
 // ---------- Helpers ----------
@@ -63,14 +69,6 @@ function utcToLocalIso(date: Date): string {
   return DateTime.fromJSDate(date).setZone(tz).toFormat("yyyy-LL-dd'T'HH:mm:ss");
 }
 
-function encodeHandle(url: string): string {
-  return Buffer.from(url, 'utf8').toString('base64url');
-}
-
-function decodeHandle(handle: string): string {
-  return Buffer.from(handle, 'base64url').toString('utf8');
-}
-
 // ---------- ICS (VTODO) ----------
 
 interface VtodoFields {
@@ -80,6 +78,8 @@ interface VtodoFields {
   description?: string;
   priority?: number;
   completed: boolean;
+  /** Raw RFC 5545 RRULE string (without "RRULE:" prefix), if recurring. */
+  rrule?: string | null;
 }
 
 function buildVtodoIcs(fields: VtodoFields): string {
@@ -99,6 +99,9 @@ function buildVtodoIcs(fields: VtodoFields): string {
   }
   if (typeof fields.priority === 'number') {
     vtodo.updatePropertyWithValue('priority', Math.max(0, Math.min(9, Math.round(fields.priority))));
+  }
+  if (fields.rrule) {
+    vtodo.updatePropertyWithValue('rrule', ICAL.Recur.fromString(fields.rrule));
   }
   if (fields.completed) {
     vtodo.updatePropertyWithValue('status', 'COMPLETED');
@@ -123,6 +126,8 @@ function parseVtodo(ics: string): VtodoFields | null {
     const status = (vtodo.getFirstPropertyValue('status') as string | null) ?? '';
     const priorityRaw = vtodo.getFirstPropertyValue('priority');
     const priority = typeof priorityRaw === 'number' ? priorityRaw : null;
+    const rruleVal = vtodo.getFirstPropertyValue('rrule') as ICAL.Recur | null;
+    const rrule = rruleVal ? rruleVal.toString() : null;
 
     return {
       uid: (vtodo.getFirstPropertyValue('uid') as string) ?? '',
@@ -132,6 +137,7 @@ function parseVtodo(ics: string): VtodoFields | null {
         (vtodo.getFirstPropertyValue('description') as string | null) ?? undefined,
       priority: priority ?? undefined,
       completed: status.toUpperCase() === 'COMPLETED',
+      rrule,
     };
   } catch (err) {
     console.warn('[caldav] Failed to parse VTODO ICS:', err);
@@ -148,6 +154,9 @@ export async function createReminder(input: CreateReminderInput): Promise<string
 
   const uid = randomUUID();
   const dueUtc = input.due_datetime ? parseLocalToUTC(input.due_datetime) : null;
+  const rrule = input.recurrence
+    ? buildRrule(input.recurrence, parseLocalToUTC)
+    : null;
 
   const ics = buildVtodoIcs({
     uid,
@@ -156,6 +165,7 @@ export async function createReminder(input: CreateReminderInput): Promise<string
     description: input.notes,
     priority: input.priority,
     completed: false,
+    rrule,
   });
 
   const filename = `${uid}.ics`;
@@ -168,12 +178,17 @@ export async function createReminder(input: CreateReminderInput): Promise<string
   const listUrl = list.url.endsWith('/') ? list.url : `${list.url}/`;
   const objectUrl = `${listUrl}${filename}`;
 
+  const recurrenceNote = rrule
+    ? ` Repeats ${describeRecurrence(input.recurrence as Recurrence)}.`
+    : '';
+
   return JSON.stringify({
     uid: encodeHandle(objectUrl),
     list: listName,
-    message: dueUtc
-      ? `Added "${input.title}" to "${listName}" due ${input.due_datetime} (${getUserTimezone()}).`
-      : `Added "${input.title}" to "${listName}".`,
+    message:
+      (dueUtc
+        ? `Added "${input.title}" to "${listName}" due ${input.due_datetime} (${getUserTimezone()}).`
+        : `Added "${input.title}" to "${listName}".`) + recurrenceNote,
   });
 }
 
@@ -212,6 +227,9 @@ export async function listReminders(input: ListRemindersInput): Promise<string> 
             list: listName,
             completed: parsed.completed,
             priority: typeof parsed.priority === 'number' ? parsed.priority : null,
+            recurrence: parsed.rrule
+              ? parseRrule(parsed.rrule, utcToLocalIso)
+              : null,
           });
         }
         return items;
@@ -275,6 +293,13 @@ export async function updateReminder(input: UpdateReminderInput): Promise<string
     typeof input.priority === 'number' ? input.priority : parsed.priority;
   const newCompleted =
     typeof input.completed === 'boolean' ? input.completed : parsed.completed;
+  // recurrence: undefined = keep, null = remove, object = set/replace.
+  const newRrule =
+    input.recurrence === undefined
+      ? parsed.rrule
+      : input.recurrence === null
+        ? null
+        : buildRrule(input.recurrence, parseLocalToUTC);
 
   const newIcs = buildVtodoIcs({
     uid: parsed.uid,
@@ -283,6 +308,7 @@ export async function updateReminder(input: UpdateReminderInput): Promise<string
     description: newDescription,
     priority: newPriority,
     completed: newCompleted,
+    rrule: newRrule,
   });
 
   await client.updateCalendarObject({

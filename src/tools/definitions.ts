@@ -1,5 +1,41 @@
 import type { ToolDefinition } from '../providers';
 
+// Shared recurrence (RRULE) schema. The model passes a small structured object
+// instead of a raw RRULE string — far less error-prone for it to emit.
+const recurrenceSchema = {
+  type: 'object',
+  description:
+    'Optional recurrence rule. Set this to make the item repeat (e.g. "every Monday", "every 2 weeks", "daily until June 30", "monthly for 6 months"). Omit for a one-off item.',
+  properties: {
+    freq: {
+      type: 'string',
+      enum: ['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'],
+      description: 'How often it repeats.',
+    },
+    interval: {
+      type: 'integer',
+      minimum: 1,
+      description: 'Repeat every N units (e.g. interval=2 with freq=WEEKLY = every other week). Defaults to 1.',
+    },
+    byday: {
+      type: 'array',
+      items: { type: 'string', enum: ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'] },
+      description: 'For WEEKLY recurrence, which days of week, e.g. ["MO","WE","FR"].',
+    },
+    count: {
+      type: 'integer',
+      minimum: 1,
+      description: 'Total number of occurrences. Mutually exclusive with until.',
+    },
+    until: {
+      type: 'string',
+      description:
+        'Local date or datetime of the last occurrence (inclusive), same format as other datetimes, e.g. "2026-12-31" or "2026-12-31T09:00:00". Mutually exclusive with count.',
+    },
+  },
+  required: ['freq'],
+} as const;
+
 export const calendarTools: ToolDefinition[] = [
   {
     name: 'create_calendar_event',
@@ -39,6 +75,7 @@ export const calendarTools: ToolDefinition[] = [
           description:
             "Set true to create an all-day event (toggles the 'All-Day' switch in Apple Calendar). For all-day events you can pass dates as 'YYYY-MM-DD' (e.g. '2026-05-25') and for a single-day all-day event the start_datetime and end_datetime should be the SAME date. For a multi-day all-day span, pass the last day as end_datetime — the bot handles the iCal exclusive-end convention internally.",
         },
+        recurrence: recurrenceSchema,
       },
       required: ['title', 'start_datetime', 'end_datetime'],
     },
@@ -86,6 +123,11 @@ export const calendarTools: ToolDefinition[] = [
           type: 'boolean',
           description: 'Convert to/from an all-day event.',
         },
+        recurrence: {
+          ...recurrenceSchema,
+          description:
+            'Set/replace the recurrence rule, or pass null to make the event one-off again. Omit to keep the existing recurrence unchanged.',
+        },
       },
       required: ['event_uid'],
     },
@@ -129,6 +171,7 @@ export const calendarTools: ToolDefinition[] = [
           description:
             'Optional priority — 1 = high, 5 = medium, 9 = low, 0 = unset (RFC 5545).',
         },
+        recurrence: recurrenceSchema,
       },
       required: ['title'],
     },
@@ -177,6 +220,11 @@ export const calendarTools: ToolDefinition[] = [
         completed: {
           type: 'boolean',
           description: 'Set true to mark the reminder done; false to reopen.',
+        },
+        recurrence: {
+          ...recurrenceSchema,
+          description:
+            'Set/replace the recurrence rule, or pass null to make the reminder one-off again. Omit to keep the existing recurrence unchanged.',
         },
       },
       required: ['reminder_uid'],

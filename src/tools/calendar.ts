@@ -8,6 +8,8 @@ import {
   findCalendarForObjectUrl,
   getUserTimezone,
 } from './caldav';
+import { encodeHandle, decodeHandle } from './handle';
+import { buildRrule, parseRrule, describeRecurrence, type Recurrence } from './rrule';
 
 export interface CreateEventInput {
   title: string;
@@ -18,6 +20,7 @@ export interface CreateEventInput {
   location?: string;
   reminder_minutes_before?: number[];
   all_day?: boolean;
+  recurrence?: Recurrence;
 }
 
 export interface ListEventsInput {
@@ -35,6 +38,8 @@ export interface UpdateEventInput {
   location?: string;
   reminder_minutes_before?: number[];
   all_day?: boolean;
+  /** Pass a recurrence to set/replace; pass null to remove recurrence. Omit to keep. */
+  recurrence?: Recurrence | null;
 }
 
 export interface DeleteEventInput {
@@ -51,6 +56,7 @@ export interface CalendarEvent {
   calendar: string;
   reminders_minutes_before: number[];
   all_day: boolean;
+  recurrence: Recurrence | null;
 }
 
 // ---------- Time helpers ----------
@@ -69,19 +75,9 @@ function utcToLocalIso(date: Date): string {
   return DateTime.fromJSDate(date).setZone(tz).toFormat("yyyy-LL-dd'T'HH:mm:ss");
 }
 
-// ---------- Handle (opaque uid we expose to Claude) ----------
-
-function encodeHandle(url: string): string {
-  return Buffer.from(url, 'utf8').toString('base64url');
-}
-
-function decodeHandle(handle: string): string {
-  return Buffer.from(handle, 'base64url').toString('utf8');
-}
-
 // ---------- ICS building / parsing ----------
 
-interface VeventFields {
+export interface VeventFields {
   uid: string;
   summary: string;
   startUtc: Date;
@@ -90,6 +86,8 @@ interface VeventFields {
   location?: string;
   reminderMinutesBefore?: number[];
   allDay?: boolean;
+  /** Raw RFC 5545 RRULE string (without the "RRULE:" prefix), if recurring. */
+  rrule?: string | null;
 }
 
 /** Parse a local date or datetime as a Luxon DateTime in the user's tz. */
@@ -120,7 +118,7 @@ function buildValarm(minutesBefore: number, summary: string): ICAL.Component {
   return valarm;
 }
 
-function buildIcs(fields: VeventFields): string {
+export function buildIcs(fields: VeventFields): string {
   const vcalendar = new ICAL.Component(['vcalendar', [], []]);
   vcalendar.updatePropertyWithValue('prodid', '-//Blurt//EN');
   vcalendar.updatePropertyWithValue('version', '2.0');
@@ -162,6 +160,12 @@ function buildIcs(fields: VeventFields): string {
     vevent.updatePropertyWithValue('location', fields.location);
   }
 
+  if (fields.rrule) {
+    // RRULE is a structured "recur" value in iCalendar. ical.js accepts a recur
+    // object built from the string; this also validates the rule shape.
+    vevent.updatePropertyWithValue('rrule', ICAL.Recur.fromString(fields.rrule));
+  }
+
   if (fields.reminderMinutesBefore && fields.reminderMinutesBefore.length > 0) {
     // De-dupe and sort largest-first (= earliest reminder first)
     const unique = Array.from(new Set(fields.reminderMinutesBefore.map((n) => Math.max(0, Math.round(n)))));
@@ -175,7 +179,7 @@ function buildIcs(fields: VeventFields): string {
   return vcalendar.toString();
 }
 
-function parseIcs(ics: string): VeventFields | null {
+export function parseIcs(ics: string): VeventFields | null {
   try {
     const jcal = ICAL.parse(ics);
     const vcal = new ICAL.Component(jcal);
@@ -198,6 +202,10 @@ function parseIcs(ics: string): VeventFields | null {
       }
     }
 
+    const rruleVal = vevent.getFirstPropertyValue('rrule') as ICAL.Recur | null;
+    // ical.js returns a Recur object; .toString() gives the canonical RRULE body.
+    const rrule = rruleVal ? rruleVal.toString() : null;
+
     return {
       uid: (vevent.getFirstPropertyValue('uid') as string) ?? '',
       summary: (vevent.getFirstPropertyValue('summary') as string) ?? '',
@@ -209,6 +217,7 @@ function parseIcs(ics: string): VeventFields | null {
         (vevent.getFirstPropertyValue('location') as string | null) ?? undefined,
       reminderMinutesBefore: reminders,
       allDay: dtstart.isDate === true,
+      rrule,
     };
   } catch (err) {
     console.warn('[caldav] Failed to parse ICS:', err);
@@ -258,6 +267,10 @@ export async function createCalendarEvent(input: CreateEventInput): Promise<stri
     throw new Error('end_datetime must be after start_datetime');
   }
 
+  const rrule = input.recurrence
+    ? buildRrule(input.recurrence, parseLocalToUTC)
+    : null;
+
   const ics = buildIcs({
     uid,
     summary: input.title,
@@ -267,6 +280,7 @@ export async function createCalendarEvent(input: CreateEventInput): Promise<stri
     location: input.location,
     reminderMinutesBefore: input.reminder_minutes_before,
     allDay,
+    rrule,
   });
 
   const filename = `${uid}.ics`;
@@ -279,10 +293,14 @@ export async function createCalendarEvent(input: CreateEventInput): Promise<stri
   const calendarUrl = calendar.url.endsWith('/') ? calendar.url : `${calendar.url}/`;
   const objectUrl = `${calendarUrl}${filename}`;
 
+  const recurrenceNote = rrule
+    ? ` Repeats ${describeRecurrence(input.recurrence as Recurrence)}.`
+    : '';
+
   return JSON.stringify({
     uid: encodeHandle(objectUrl),
     calendar: calName,
-    message: `Created "${input.title}" in calendar "${calName}" from ${input.start_datetime} to ${input.end_datetime} (${getUserTimezone()}).`,
+    message: `Created "${input.title}" in calendar "${calName}" from ${input.start_datetime} to ${input.end_datetime} (${getUserTimezone()}).${recurrenceNote}`,
   });
 }
 
@@ -315,7 +333,13 @@ export async function listCalendarEvents(input: ListEventsInput): Promise<string
           if (!obj.data) continue;
           const parsed = parseIcs(obj.data);
           if (!parsed) continue;
-          if (parsed.endUtc < startUtc || parsed.startUtc > endUtc) continue;
+          // For one-off events, drop anything outside the queried window. For
+          // recurring events we keep them even if the FIRST instance predates
+          // the range — the server already returned them because an occurrence
+          // falls inside it (expand:false sends the master VEVENT).
+          if (!parsed.rrule && (parsed.endUtc < startUtc || parsed.startUtc > endUtc)) {
+            continue;
+          }
           const isAllDay = parsed.allDay === true;
           events.push({
             uid: encodeHandle(obj.url),
@@ -331,6 +355,9 @@ export async function listCalendarEvents(input: ListEventsInput): Promise<string
             calendar: calName,
             reminders_minutes_before: parsed.reminderMinutesBefore ?? [],
             all_day: isAllDay,
+            recurrence: parsed.rrule
+              ? parseRrule(parsed.rrule, utcToLocalIso)
+              : null,
           });
         }
         return events;
@@ -397,6 +424,13 @@ export async function updateCalendarEvent(input: UpdateEventInput): Promise<stri
       : parsed.reminderMinutesBefore;
   const newAllDay =
     input.all_day !== undefined ? input.all_day : parsed.allDay === true;
+  // recurrence: undefined = keep existing, null = remove, object = set/replace.
+  const newRrule =
+    input.recurrence === undefined
+      ? parsed.rrule
+      : input.recurrence === null
+        ? null
+        : buildRrule(input.recurrence, parseLocalToUTC);
 
   if (!newAllDay && newEndUtc.getTime() <= newStartUtc.getTime()) {
     throw new Error('end_datetime must be after start_datetime');
@@ -411,6 +445,7 @@ export async function updateCalendarEvent(input: UpdateEventInput): Promise<stri
     location: newLocation,
     reminderMinutesBefore: newReminders,
     allDay: newAllDay,
+    rrule: newRrule,
   });
 
   await client.updateCalendarObject({
